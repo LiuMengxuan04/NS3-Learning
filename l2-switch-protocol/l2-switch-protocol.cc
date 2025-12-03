@@ -165,7 +165,8 @@ private:
     void ForwardUnicast(Ptr<NetDevice> outDevice,
                        Ptr<const Packet> packet,
                        uint16_t protocol,
-                       const Address& destination);
+                       const Mac48Address& source,
+                       const Mac48Address& destination);
 
     /**
      * @brief 广播转发（泛洪）
@@ -177,7 +178,8 @@ private:
     void ForwardBroadcast(Ptr<NetDevice> inDevice,
                          Ptr<const Packet> packet,
                          uint16_t protocol,
-                         const Address& destination);
+                         const Mac48Address& source,
+                         const Mac48Address& destination);
 
     // ========== 成员变量 ==========
 
@@ -292,7 +294,7 @@ L2SwitchProtocol::ReceiveFromDevice(Ptr<NetDevice> inDevice,
 {
     NS_LOG_FUNCTION(this << inDevice << packet << protocol << from << to << packetType);
 
-    // 将地址转换为 MAC 地址
+    // 将地址转换为 MAC 地址（真实的数据帧来源和目的）
     Mac48Address srcMac = Mac48Address::ConvertFrom(from);
     Mac48Address dstMac = Mac48Address::ConvertFrom(to);
 
@@ -307,7 +309,7 @@ L2SwitchProtocol::ReceiveFromDevice(Ptr<NetDevice> inDevice,
     {
         // 广播帧 - 泛洪到所有端口
         NS_LOG_INFO(m_switchName << ": Broadcasting packet from " << srcMac);
-        ForwardBroadcast(inDevice, packet, protocol, to);
+        ForwardBroadcast(inDevice, packet, protocol, srcMac, dstMac);
     }
     else
     {
@@ -319,13 +321,13 @@ L2SwitchProtocol::ReceiveFromDevice(Ptr<NetDevice> inDevice,
             // 已知目的端口，单播转发
             NS_LOG_INFO(m_switchName << ": Forwarding " << srcMac << " -> " << dstMac
                        << " via port " << outDevice->GetIfIndex());
-            ForwardUnicast(outDevice, packet, protocol, to);
+            ForwardUnicast(outDevice, packet, protocol, srcMac, dstMac);
         }
         else if (!outDevice)
         {
             // 未知目的端口，泛洪
             NS_LOG_INFO(m_switchName << ": Unknown destination " << dstMac << ", flooding");
-            ForwardBroadcast(inDevice, packet, protocol, to);
+            ForwardBroadcast(inDevice, packet, protocol, srcMac, dstMac);
         }
         else
         {
@@ -373,12 +375,13 @@ void
 L2SwitchProtocol::ForwardUnicast(Ptr<NetDevice> outDevice,
                                 Ptr<const Packet> packet,
                                 uint16_t protocol,
-                                const Address& destination)
+                                const Mac48Address& source,
+                                const Mac48Address& destination)
 {
     NS_LOG_FUNCTION(this << outDevice << packet << protocol << destination);
 
-    // 发送数据包到指定端口
-    outDevice->Send(packet->Copy(), destination, protocol);
+    // 保留原始源 MAC，使用 SendFrom 发送
+    outDevice->SendFrom(packet->Copy(), source, destination, protocol);
 }
 
 // ========== 广播转发 ==========
@@ -386,7 +389,8 @@ void
 L2SwitchProtocol::ForwardBroadcast(Ptr<NetDevice> inDevice,
                                   Ptr<const Packet> packet,
                                   uint16_t protocol,
-                                  const Address& destination)
+                                  const Mac48Address& source,
+                                  const Mac48Address& destination)
 {
     NS_LOG_FUNCTION(this << inDevice << packet << protocol << destination);
 
@@ -397,7 +401,7 @@ L2SwitchProtocol::ForwardBroadcast(Ptr<NetDevice> inDevice,
         Ptr<NetDevice> device = m_node->GetDevice(i);
         if (device != inDevice)
         {
-            device->Send(packet->Copy(), destination, protocol);
+            device->SendFrom(packet->Copy(), source, destination, protocol);
         }
     }
 }
@@ -671,7 +675,7 @@ int main(int argc, char* argv[])
  *    Host A -> Host C:
  *      Host A -> Switch0 -> Switch1 -> Switch2 -> Host C
  *    Host B -> Host C:
- *      Host B -> Switch1 -> Switch2 -> Host C
+ *      Host B -> Switch1 -> Switch2 -> Host C 
  *
  * ============================================================================
  */

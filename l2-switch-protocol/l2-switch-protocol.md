@@ -315,12 +315,12 @@ else
     if (outDevice && outDevice != inDevice)
     {
         // 情况 1: 已知端口且与入端口不同 - 单播转发
-        ForwardUnicast(outDevice, packet, protocol, to);
+        ForwardUnicast(outDevice, packet, protocol, srcMac, dstMac);
     }
     else if (!outDevice)
     {
         // 情况 2: 未知端口 - 泛洪
-        ForwardBroadcast(inDevice, packet, protocol, to);
+        ForwardBroadcast(inDevice, packet, protocol, srcMac, dstMac);
     }
     else
     {
@@ -339,17 +339,18 @@ void L2SwitchProtocol::ForwardUnicast(
     Ptr<NetDevice> outDevice,
     Ptr<const Packet> packet,
     uint16_t protocol,
-    const Address& destination)
+    const Mac48Address& source,
+    const Mac48Address& destination)
 {
-    // 通过指定端口发送数据包
-    outDevice->Send(packet->Copy(), destination, protocol);
+    // 通过指定端口发送数据包，同时保留原始源/目的 MAC
+    outDevice->SendFrom(packet->Copy(), source, destination, protocol);
 }
 ```
 
 **关键点**:
 - 使用 `packet->Copy()` 创建数据包副本
 - 只向一个端口发送（单播）
-- 保持以太网帧头不变
+- 通过 `SendFrom` 明确指定源/目的 MAC，从而跨多跳保持帧头不变
 
 ##### 4.2 广播转发 (ForwardBroadcast)
 
@@ -358,7 +359,8 @@ void L2SwitchProtocol::ForwardBroadcast(
     Ptr<NetDevice> inDevice,
     Ptr<const Packet> packet,
     uint16_t protocol,
-    const Address& destination)
+    const Mac48Address& source,
+    const Mac48Address& destination)
 {
     // 向所有端口转发（除了入端口）
     uint32_t nDevices = m_node->GetNDevices();
@@ -367,7 +369,7 @@ void L2SwitchProtocol::ForwardBroadcast(
         Ptr<NetDevice> device = m_node->GetDevice(i);
         if (device != inDevice)  // 排除入端口（防止回发）
         {
-            device->Send(packet->Copy(), destination, protocol);
+            device->SendFrom(packet->Copy(), source, destination, protocol);
         }
     }
 }
@@ -594,9 +596,9 @@ void AgeTable() {
                找到端口                   未找到端口
                    │                         │
                    ▼                         ▼
-          出端口 = 入端口?           ┌──────────┐
-              /        \             │ 泛洪转发 │
-             是         否            └──────────┘
+          出端口 = 入端口?              ┌──────────┐
+              /        \              │ 泛洪转发  │
+             是         否             └──────────┘
             /            \
            ▼              ▼
       ┌────────┐    ┌──────────┐
@@ -875,8 +877,8 @@ Switch 2: {}
 ┌──────────────────────────────────────────────┐
 │ IP Packet (UDP Echo Request)                 │
 │ Ethernet Header:                             │
-│   Src MAC: AA:AA:AA:AA:AA:AA                │
-│   Dst MAC: CC:CC:CC:CC:CC:CC                │
+│   Src MAC: AA:AA:AA:AA:AA:AA                 │
+│   Dst MAC: CC:CC:CC:CC:CC:CC                 │
 │   Type: 0x0800 (IPv4)                        │
 │ IP Header:                                   │
 │   Src IP: 192.168.1.1                        │
@@ -915,8 +917,8 @@ Switch 2: {}
 ┌──────────────────────────────────────────────┐
 │ IP Packet (UDP Echo Reply)                   │
 │ Ethernet Header:                             │
-│   Src MAC: CC:CC:CC:CC:CC:CC                │
-│   Dst MAC: AA:AA:AA:AA:AA:AA                │
+│   Src MAC: CC:CC:CC:CC:CC:CC                 │
+│   Dst MAC: AA:AA:AA:AA:AA:AA                 │
 │   Type: 0x0800 (IPv4)                        │
 │ IP Header:                                   │
 │   Src IP: 192.168.1.3                        │
@@ -1281,6 +1283,9 @@ protocol->Initialize();
 - ✅ **不依赖** ns-3 内置的 `BridgeNetDevice`
 - ✅ 协议通过混杂模式回调接收所有数据包
 - ✅ 协议自主完成 MAC 学习和转发决策
+
+> **进一步的经验教训（2025-12-03）**  
+> 后续调试中我们还发现：即便改成 CSMA，如果在 `ForwardUnicast/ForwardBroadcast` 里调用的是 `NetDevice::Send()`，出端口仍会用自己的 MAC 重新封装帧，从而导致下游交换机看到的源地址变成“上一跳端口”。因此我们改为调用 `SendFrom()`，并将原始 `Src/Dst MAC` 作为参数传递，这样帧头在多跳链路中才能保持一致，所有交换机都能学习到真实的主机 MAC。换言之：**CSMA + SendFrom + 自定义协议** 才是真正完整的解决方案。
 
 ### 10.5 修复后的正确输出
 
